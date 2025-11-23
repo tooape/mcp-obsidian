@@ -8,6 +8,7 @@ from mcp.types import (
 import json
 import os
 from . import obsidian
+from . import graph
 
 api_key = os.getenv("OBSIDIAN_API_KEY", "")
 obsidian_host = os.getenv("OBSIDIAN_HOST", "127.0.0.1")
@@ -628,5 +629,99 @@ class RecentChangesToolHandler(ToolHandler):
             TextContent(
                 type="text",
                 text=json.dumps(results, indent=2)
+            )
+        ]
+
+class GetNoteGraphToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_get_note_graph")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Traverse the link graph from a known note to discover connected ideas. Returns neighbors with snippets showing why notes are connected. Best for: exploring context around a specific note, building conceptual maps, understanding note relationships. Use max_hops=1 for direct neighbors (fast), max_hops=2 for comprehensive exploration.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "note_path": {
+                        "type": "string",
+                        "description": "Path to the starting note (e.g., 'Notes/Programs/Intent/Intent AI Home.md')"
+                    },
+                    "max_hops": {
+                        "type": "integer",
+                        "description": "Maximum number of link hops to traverse (1 or 2)",
+                        "enum": [1, 2],
+                        "default": 1
+                    },
+                    "max_nodes": {
+                        "type": "integer",
+                        "description": "Maximum number of connected notes to return (default: 30)",
+                        "default": 30,
+                        "minimum": 5,
+                        "maximum": 100
+                    },
+                    "snippet_length": {
+                        "type": "integer",
+                        "description": "Number of characters to include in snippets (default: 200)",
+                        "default": 200,
+                        "minimum": 50,
+                        "maximum": 500
+                    }
+                },
+                "required": ["note_path"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "note_path" not in args:
+            raise RuntimeError("note_path argument missing in arguments")
+
+        note_path = args["note_path"]
+        max_hops = args.get("max_hops", 1)
+        max_nodes = args.get("max_nodes", 30)
+        snippet_length = args.get("snippet_length", 200)
+
+        if max_hops not in (1, 2):
+            raise RuntimeError(f"max_hops must be 1 or 2, got {max_hops}")
+
+        if not isinstance(max_nodes, int) or max_nodes < 5:
+            raise RuntimeError(f"max_nodes must be at least 5, got {max_nodes}")
+
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+
+        # Get all files in vault for path resolution
+        all_files = api.list_files_in_vault()
+        file_paths = [f['path'] for f in all_files if f['type'] == 'file']
+
+        # Traverse the graph
+        note_graph = graph.NoteGraph()
+        result = note_graph.traverse(
+            start_path=note_path,
+            all_files=file_paths,
+            file_getter=api.get_file_contents,
+            max_hops=max_hops,
+            direction="both",
+            max_nodes=max_nodes
+        )
+
+        # Extract snippets for each node
+        for node in result['nodes']:
+            try:
+                content = api.get_file_contents(node['path'])
+                # Extract snippet from the beginning
+                snippet = content[:snippet_length].strip()
+                # Truncate at sentence boundary if possible
+                if len(content) > snippet_length:
+                    last_period = snippet.rfind('.')
+                    if last_period > 0:
+                        snippet = snippet[:last_period + 1]
+                node['snippet'] = snippet
+            except Exception:
+                node['snippet'] = ""
+
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
             )
         ]
