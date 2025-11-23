@@ -690,8 +690,18 @@ class GetNoteGraphToolHandler(ToolHandler):
         api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
 
         # Get all files in vault for path resolution
-        all_files = api.list_files_in_vault()
-        file_paths = [f['path'] for f in all_files if f['type'] == 'file']
+        try:
+            all_files = api.list_files_in_vault()
+            file_paths = []
+            if isinstance(all_files, list):
+                for f in all_files:
+                    if isinstance(f, dict):
+                        if f.get('type') == 'file' and 'path' in f:
+                            file_paths.append(f['path'])
+                    elif isinstance(f, str):
+                        file_paths.append(f)
+        except Exception as e:
+            raise RuntimeError(f"Failed to list vault files: {str(e)}")
 
         # Traverse the graph
         note_graph = graph.NoteGraph()

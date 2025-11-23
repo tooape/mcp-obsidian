@@ -188,7 +188,7 @@ class NoteGraph:
 
         Args:
             start_path: Path to start traversal from
-            all_files: List of all files in vault
+            all_files: List of all files in vault (file paths as strings)
             file_getter: Callable to get file contents
             max_hops: Maximum number of hops (1 or 2)
             direction: "outgoing", "incoming", or "both"
@@ -202,6 +202,9 @@ class NoteGraph:
         result_nodes = {}
         result_edges = []
 
+        # Normalize all file paths for comparison
+        normalized_files = [self.normalize_path(f) if isinstance(f, str) else "" for f in all_files]
+
         while queue and len(result_nodes) < max_nodes:
             current_path, hop = queue.popleft()
 
@@ -213,6 +216,8 @@ class NoteGraph:
             # Get file content
             try:
                 content = file_getter(current_path)
+                if not isinstance(content, str):
+                    continue
             except Exception as e:
                 continue
 
@@ -232,7 +237,10 @@ class NoteGraph:
 
             # Find links based on direction
             if hop < max_hops:
-                outgoing = LinkExtractor.extract_wikilinks(content)
+                try:
+                    outgoing = LinkExtractor.extract_wikilinks(content)
+                except Exception:
+                    outgoing = []
 
                 for target, link_text, _ in outgoing:
                     target_path = self.find_note_path(target, all_files)
