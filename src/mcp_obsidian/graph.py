@@ -138,19 +138,31 @@ class NoteGraph:
         Returns:
             The full path to the matching file, or None
         """
+        if not target or not all_files:
+            return None
+
         target_normalized = self.normalize_path(target)
+        target_filename = Path(target_normalized).name
 
         for file_path in all_files:
+            if not isinstance(file_path, str):
+                continue
+
             normalized = self.normalize_path(file_path)
 
             # Direct match
             if normalized == target_normalized:
                 return file_path
 
-            # Match just the filename
+            # Match just the filename (most common case for wikilinks)
             filename = Path(normalized).name
-            target_filename = Path(target_normalized).name
             if filename == target_filename:
+                return file_path
+
+            # Handle notes with spaces vs underscores
+            filename_underscores = filename.replace(' ', '_')
+            target_underscores = target_filename.replace(' ', '_')
+            if filename_underscores == target_underscores:
                 return file_path
 
         return None
