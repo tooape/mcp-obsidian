@@ -214,8 +214,13 @@ class NoteGraph:
         result_nodes = {}
         result_edges = []
 
-        # Normalize all file paths for comparison
-        normalized_files = [self.normalize_path(f) if isinstance(f, str) else "" for f in all_files]
+        # Build a map of note names to file paths for faster lookup
+        note_name_to_path = {}
+        for file_path in all_files:
+            if isinstance(file_path, str):
+                normalized = self.normalize_path(file_path)
+                filename = Path(normalized).name
+                note_name_to_path[filename] = file_path
 
         while queue and len(result_nodes) < max_nodes:
             current_path, hop = queue.popleft()
@@ -249,21 +254,57 @@ class NoteGraph:
 
             # Find links based on direction
             if hop < max_hops:
-                try:
-                    outgoing = LinkExtractor.extract_wikilinks(content)
-                except Exception:
-                    outgoing = []
+                # Outgoing links: links FROM current note
+                if direction in ("outgoing", "both"):
+                    try:
+                        outgoing = LinkExtractor.extract_wikilinks(content)
+                    except Exception:
+                        outgoing = []
 
-                for target, link_text, _ in outgoing:
-                    target_path = self.find_note_path(target, all_files)
-                    if target_path and target_path not in self.visited:
-                        result_edges.append({
-                            'from': current_path,
-                            'to': target_path,
-                            'type': 'wikilink',
-                            'link_text': link_text
-                        })
-                        queue.append((target_path, hop + 1))
+                    for target, link_text, _ in outgoing:
+                        target_path = self.find_note_path(target, all_files)
+                        if target_path and target_path not in self.visited:
+                            result_edges.append({
+                                'from': current_path,
+                                'to': target_path,
+                                'type': 'wikilink',
+                                'link_text': link_text
+                            })
+                            queue.append((target_path, hop + 1))
+
+                # Incoming links: links TO current note (backlinks)
+                if direction in ("incoming", "both"):
+                    # Find all files that link to the current note
+                    current_filename = Path(self.normalize_path(current_path)).name
+
+                    for file_path in all_files:
+                        if file_path == current_path or file_path in self.visited:
+                            continue
+
+                        try:
+                            file_content = file_getter(file_path)
+                            if not isinstance(file_content, str):
+                                continue
+
+                            # Extract wikilinks from this file
+                            links = LinkExtractor.extract_wikilinks(file_content)
+                            found_link = False
+                            for target, link_text, _ in links:
+                                # Check if this file links to current note
+                                target_filename = Path(self.normalize_path(target)).name
+                                if target_filename == current_filename:
+                                    if file_path not in result_nodes:
+                                        result_edges.append({
+                                            'from': file_path,
+                                            'to': current_path,
+                                            'type': 'wikilink',
+                                            'link_text': link_text
+                                        })
+                                        queue.append((file_path, hop + 1))
+                                        found_link = True
+                                        break
+                        except Exception:
+                            continue
 
         return {
             'center_node': {

@@ -735,3 +735,102 @@ class GetNoteGraphToolHandler(ToolHandler):
                 text=json.dumps(result, indent=2)
             )
         ]
+
+
+class GetActiveFileToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_get_active_file")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Get the currently active (open) file in Obsidian. Returns the file path, content, and optionally metadata like frontmatter and tags.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "format": {
+                        "type": "string",
+                        "description": "Return format: 'markdown' for raw content, 'json' for structured data with frontmatter, tags, and file stats",
+                        "enum": ["markdown", "json"],
+                        "default": "json"
+                    }
+                }
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        format_type = args.get("format", "json")
+        if format_type not in ("markdown", "json"):
+            raise RuntimeError(f"Invalid format: {format_type}. Must be 'markdown' or 'json'")
+
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+
+        try:
+            result = api.get_active_file(format=format_type)
+
+            if format_type == "json":
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2)
+                    )
+                ]
+            else:
+                return [
+                    TextContent(
+                        type="text",
+                        text=result
+                    )
+                ]
+        except Exception as e:
+            error_msg = str(e)
+            if "404" in error_msg:
+                raise RuntimeError("No file is currently active in Obsidian")
+            raise RuntimeError(f"Failed to get active file: {error_msg}")
+
+
+class ShowFileToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_show_file")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Open a file in Obsidian's UI. If the file doesn't exist, Obsidian will create it.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "filepath": {
+                        "type": "string",
+                        "description": "Path to the file (relative to vault root)",
+                        "format": "path"
+                    },
+                    "new_leaf": {
+                        "type": "boolean",
+                        "description": "If true, open in a new pane/tab instead of replacing the current view",
+                        "default": False
+                    }
+                },
+                "required": ["filepath"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "filepath" not in args:
+            raise RuntimeError("filepath argument missing in arguments")
+
+        filepath = args["filepath"]
+        new_leaf = args.get("new_leaf", False)
+
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+
+        try:
+            api.open_file(filepath, new_leaf=new_leaf)
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Successfully opened {filepath} in Obsidian"
+                )
+            ]
+        except Exception as e:
+            raise RuntimeError(f"Failed to open file: {str(e)}")

@@ -252,11 +252,11 @@ class Obsidian():
     
     def get_recent_changes(self, limit: int = 10, days: int = 90) -> Any:
         """Get recently modified files in the vault.
-        
+
         Args:
             limit: Maximum number of files to return (default: 10)
             days: Only include files modified within this many days (default: 90)
-            
+
         Returns:
             List of recently modified files with metadata
         """
@@ -267,16 +267,16 @@ class Obsidian():
             "SORT file.mtime DESC",
             f"LIMIT {limit}"
         ]
-        
+
         # Join with proper DQL line breaks
         dql_query = "\n".join(query_lines)
-        
+
         # Make the request to search endpoint
         url = f"{self.get_base_url()}/search/"
         headers = self._get_headers() | {
             'Content-Type': 'application/vnd.olrapi.dataview.dql+txt'
         }
-        
+
         def call_fn():
             response = requests.post(
                 url,
@@ -287,5 +287,62 @@ class Obsidian():
             )
             response.raise_for_status()
             return response.json()
+
+        return self._safe_call(call_fn)
+
+    def get_active_file(self, format: str = "markdown") -> Any:
+        """Get the currently active file in Obsidian.
+
+        Args:
+            format: Return format - 'markdown' for raw content, 'json' for
+                    structured data including frontmatter, tags, and metadata.
+
+        Returns:
+            If format='markdown': Raw markdown content as string
+            If format='json': Dict with path, content, frontmatter, tags, stat
+        """
+        url = f"{self.get_base_url()}/active/"
+
+        def call_fn():
+            headers = self._get_headers()
+            if format == "json":
+                headers['Accept'] = 'application/vnd.olrapi.note+json'
+            response = requests.get(url, headers=headers, verify=self.verify_ssl, timeout=self.timeout)
+            response.raise_for_status()
+
+            if format == "json":
+                return response.json()
+            return response.text
+
+        return self._safe_call(call_fn)
+
+    def open_file(self, filepath: str, new_leaf: bool = False) -> Any:
+        """Open a file in Obsidian's UI.
+
+        Args:
+            filepath: Path to the file (relative to vault root)
+            new_leaf: If True, open in a new pane/tab
+
+        Returns:
+            None on success
+
+        Note:
+            Obsidian will create a new document at the path if it doesn't exist.
+        """
+        url = f"{self.get_base_url()}/open/{filepath}"
+        params = {}
+        if new_leaf:
+            params['newLeaf'] = 'true'
+
+        def call_fn():
+            response = requests.post(
+                url,
+                headers=self._get_headers(),
+                params=params if params else None,
+                verify=self.verify_ssl,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return None
 
         return self._safe_call(call_fn)
