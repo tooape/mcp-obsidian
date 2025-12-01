@@ -7,8 +7,11 @@ from mcp.types import (
 )
 import json
 import os
+import re
+from datetime import datetime
 from . import obsidian
 from . import graph
+from . import backend
 
 api_key = os.getenv("OBSIDIAN_API_KEY", "")
 obsidian_host = os.getenv("OBSIDIAN_HOST", "127.0.0.1")
@@ -834,3 +837,74 @@ class ShowFileToolHandler(ToolHandler):
             ]
         except Exception as e:
             raise RuntimeError(f"Failed to open file: {str(e)}")
+
+
+class SmartSearchToolHandler(ToolHandler):
+    """Smart semantic search with hybrid ranking (dense + BM25 + recency)."""
+
+    def __init__(self):
+        super().__init__("obsidian_smart_search")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="""Smart semantic search across your Obsidian vault using hybrid ranking.
+
+Combines dense embeddings (EmbeddingGemma), BM25 keyword matching, and recency weighting.
+Uses benchmark-validated hierarchical chunking (H1-H6 headings).
+Returns chunked results (not full notes) for precise retrieval.
+
+Modes:
+- default: Balanced for daily use (MRR@5: 0.6374)
+- research: Higher semantic weight for deep research (MRR@5: 0.6316)
+- unweighted: Pure hybrid without recency""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query - can be a question, keywords, or natural language"
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of results to return (default: 5)",
+                        "default": 5,
+                        "minimum": 1,
+                        "maximum": 20
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "Ranking mode: 'default', 'research', or 'unweighted'",
+                        "enum": ["default", "research", "unweighted"],
+                        "default": "default"
+                    }
+                },
+                "required": ["query"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "query" not in args:
+            raise RuntimeError("query argument missing in arguments")
+
+        query = args["query"]
+        top_k = args.get("top_k", 5)
+        mode = args.get("mode", "default")
+
+        # Call smart search vault endpoint (self-contained - fetches files itself)
+        try:
+            embedding_client = backend.get_embedding_client()
+            result = embedding_client.smart_search_vault(
+                query=query,
+                top_k=top_k,
+                mode=mode,
+            )
+
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(result, indent=2)
+                )
+            ]
+        except Exception as e:
+            raise RuntimeError(f"Smart search failed: {str(e)}")

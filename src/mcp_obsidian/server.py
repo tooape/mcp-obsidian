@@ -57,6 +57,7 @@ add_tool_handler(tools.RecentChangesToolHandler())
 add_tool_handler(tools.GetNoteGraphToolHandler())
 add_tool_handler(tools.GetActiveFileToolHandler())
 add_tool_handler(tools.ShowFileToolHandler())
+add_tool_handler(tools.SmartSearchToolHandler())
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:

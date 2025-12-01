@@ -148,6 +148,117 @@ class EmbeddingBackend:
         response.raise_for_status()
         return response.json()
 
+    def smart_search(
+        self,
+        query: str,
+        chunks: List[Dict[str, Any]],
+        top_k: int = 5,
+        alpha: float = 0.624,
+        recency_weight: float = 0.340,
+        decay_days: float = 10.25,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Perform smart hybrid search with recency weighting (legacy, uses pre-chunked data).
+
+        Args:
+            query: Search query text
+            chunks: List of chunk dicts with chunk_id, title, content, note_path, metadata
+            top_k: Number of results to return (default: 5)
+            alpha: Dense vs BM25 weight (default: 0.624 = 62% dense)
+            recency_weight: Weight for recency in final blend (default: 0.340)
+            decay_days: Exponential decay half-life in days (default: 10.25)
+            filters: Optional filters (pageType, tags, dateCreated, dateModified)
+
+        Returns:
+            Dict with ranked results including title, content, note_path, score, metadata
+        """
+        payload = {
+            "query": query,
+            "chunks": chunks,
+            "top_k": top_k,
+            "alpha": alpha,
+            "recency_weight": recency_weight,
+            "decay_days": decay_days,
+        }
+        if filters:
+            payload["filters"] = filters
+
+        response = requests.post(
+            f"{self.base_url}/api/smart-search",
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def smart_search_files(
+        self,
+        query: str,
+        files: List[Dict[str, str]],
+        top_k: int = 5,
+        mode: str = "default",
+    ) -> Dict[str, Any]:
+        """Smart search with server-side chunking (recommended).
+
+        Uses benchmark-validated hierarchical chunking (H1-H6).
+
+        Args:
+            query: Search query text
+            files: List of dicts with 'path' and 'content' keys
+            top_k: Number of results to return (default: 5)
+            mode: Ranking preset - 'default', 'research', or 'unweighted'
+
+        Returns:
+            Dict with ranked results including title, content, note_path, score, metadata
+        """
+        payload = {
+            "query": query,
+            "files": files,
+            "top_k": top_k,
+            "mode": mode,
+        }
+
+        response = requests.post(
+            f"{self.base_url}/api/smart-search-files",
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def smart_search_vault(
+        self,
+        query: str,
+        top_k: int = 5,
+        mode: str = "default",
+    ) -> Dict[str, Any]:
+        """Smart search across entire vault (self-contained).
+
+        The backend fetches all vault files itself via Obsidian REST API.
+        Requires OBSIDIAN_API_KEY to be set in the backend environment.
+
+        Args:
+            query: Search query text
+            top_k: Number of results to return (default: 5)
+            mode: Ranking preset - 'default', 'research', or 'unweighted'
+
+        Returns:
+            Dict with ranked results including title, content, note_path, score, metadata
+        """
+        payload = {
+            "query": query,
+            "top_k": top_k,
+            "mode": mode,
+        }
+
+        response = requests.post(
+            f"{self.base_url}/api/smart-search-vault",
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
 
 class BackendManager:
     """Manages the Python embedding backend lifecycle.
