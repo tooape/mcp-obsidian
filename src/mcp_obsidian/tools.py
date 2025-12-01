@@ -891,14 +891,14 @@ Modes:
         top_k = args.get("top_k", 5)
         mode = args.get("mode", "default")
 
-        # Call smart search vault endpoint (self-contained - fetches files itself)
+        # Forward request to RAG backend
         try:
-            embedding_client = backend.get_embedding_client()
-            result = embedding_client.smart_search_vault(
-                query=query,
-                top_k=top_k,
-                mode=mode,
-            )
+            proxy = backend.get_backend_proxy()
+            result = proxy.post("/api/smart-search-vault", {
+                "query": query,
+                "top_k": top_k,
+                "mode": mode,
+            })
 
             return [
                 TextContent(
