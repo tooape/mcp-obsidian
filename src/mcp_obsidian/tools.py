@@ -12,6 +12,9 @@ from datetime import datetime
 from . import obsidian
 from . import graph
 from . import backend
+from .graph_index import GraphIndex, get_graph_index
+from .graph_filter import FilterConfig, GraphFilter, create_filter_from_args
+from .graph_ranker import RankingConfig, GraphRanker, create_ranker_from_args
 
 api_key = os.getenv("OBSIDIAN_API_KEY", "")
 obsidian_host = os.getenv("OBSIDIAN_HOST", "127.0.0.1")
@@ -636,6 +639,18 @@ class RecentChangesToolHandler(ToolHandler):
         ]
 
 class GetNoteGraphToolHandler(ToolHandler):
+    """
+    Traverse the link graph with filtering, ranking, and cached index support.
+
+    Enhanced with:
+    - Cached graph index for O(1) backlink queries
+    - Tag, frontmatter, path, and date filtering
+    - PageRank + recency ranking (aligned with smart search P1)
+    """
+
+    # Cached graph index (lazy initialization)
+    _graph_index: GraphIndex = None
+
     def __init__(self):
         super().__init__("obsidian_get_note_graph")
 
@@ -646,6 +661,7 @@ class GetNoteGraphToolHandler(ToolHandler):
             inputSchema={
                 "type": "object",
                 "properties": {
+                    # Core parameters (unchanged for backward compatibility)
                     "note_path": {
                         "type": "string",
                         "description": "Path to the starting note (e.g., 'Notes/Programs/Intent/Intent AI Home.md')"
@@ -669,6 +685,64 @@ class GetNoteGraphToolHandler(ToolHandler):
                         "default": 200,
                         "minimum": 50,
                         "maximum": 500
+                    },
+                    # Filter parameters (new)
+                    "filter_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter by tags (e.g., ['project', 'active'])"
+                    },
+                    "filter_tags_match_all": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "If true, require ALL tags. If false (default), ANY tag matches."
+                    },
+                    "filter_frontmatter": {
+                        "type": "object",
+                        "description": "Filter by frontmatter fields (e.g., {'pageType': 'daily', 'status': 'active'})"
+                    },
+                    "filter_include_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Include only paths matching these glob patterns (e.g., ['Projects/*', 'Work/*'])"
+                    },
+                    "filter_exclude_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exclude paths matching these patterns (e.g., ['Archive/*', 'Templates/*'])"
+                    },
+                    "filter_created_after": {
+                        "type": "string",
+                        "description": "Include only notes created after this date (YYYY-MM-DD)"
+                    },
+                    "filter_created_before": {
+                        "type": "string",
+                        "description": "Include only notes created before this date (YYYY-MM-DD)"
+                    },
+                    "filter_modified_after": {
+                        "type": "string",
+                        "description": "Include only notes modified after this date (YYYY-MM-DD)"
+                    },
+                    "filter_modified_before": {
+                        "type": "string",
+                        "description": "Include only notes modified before this date (YYYY-MM-DD)"
+                    },
+                    # Ranking parameters (new)
+                    "enable_pagerank": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Enable PageRank scoring for importance"
+                    },
+                    "enable_recency": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Enable recency weighting (recent notes ranked higher)"
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "enum": ["relevance", "recency", "pagerank", "hop_distance"],
+                        "default": "relevance",
+                        "description": "Sort results by: relevance (PageRank+recency), recency, pagerank, or hop_distance"
                     }
                 },
                 "required": ["note_path"]
@@ -683,6 +757,7 @@ class GetNoteGraphToolHandler(ToolHandler):
         max_hops = args.get("max_hops", 1)
         max_nodes = args.get("max_nodes", 30)
         snippet_length = args.get("snippet_length", 200)
+        sort_by = args.get("sort_by", "relevance")
 
         if max_hops not in (1, 2):
             raise RuntimeError(f"max_hops must be 1 or 2, got {max_hops}")
@@ -706,31 +781,43 @@ class GetNoteGraphToolHandler(ToolHandler):
         except Exception as e:
             raise RuntimeError(f"Failed to list vault files: {str(e)}")
 
-        # Traverse the graph
-        note_graph = graph.NoteGraph()
-        result = note_graph.traverse(
-            start_path=note_path,
-            all_files=file_paths,
+        # Get or build graph index (lazy initialization)
+        # TODO: Load exclude_paths from config for "Do Not Search" folders
+        graph_index = get_graph_index(
             file_getter=api.get_file_contents,
-            max_hops=max_hops,
-            direction="both",
-            max_nodes=max_nodes
+            all_files=file_paths,
+            exclude_paths=args.get("filter_exclude_paths")
         )
 
-        # Extract snippets for each node
-        for node in result['nodes']:
-            try:
-                content = api.get_file_contents(node['path'])
-                # Extract snippet from the beginning
-                snippet = content[:snippet_length].strip()
-                # Truncate at sentence boundary if possible
-                if len(content) > snippet_length:
-                    last_period = snippet.rfind('.')
-                    if last_period > 0:
-                        snippet = snippet[:last_period + 1]
-                node['snippet'] = snippet
-            except Exception:
-                node['snippet'] = ""
+        # Create filter config from args
+        filter_config = create_filter_from_args(args)
+        graph_filter = GraphFilter(filter_config) if filter_config else None
+
+        # Traverse the graph using index for backlinks
+        result = self._traverse_with_index(
+            start_path=note_path,
+            file_paths=file_paths,
+            graph_index=graph_index,
+            graph_filter=graph_filter,
+            file_getter=api.get_file_contents,
+            max_hops=max_hops,
+            max_nodes=max_nodes,
+            snippet_length=snippet_length
+        )
+
+        # Apply ranking
+        ranker = create_ranker_from_args(args)
+        result['nodes'] = ranker.rank(
+            nodes=result['nodes'],
+            pagerank_scores=graph_index.pagerank_scores,
+            sort_by=sort_by
+        )
+
+        # Add summary info
+        result['summary']['filters_applied'] = (
+            filter_config.get_applied_filters() if filter_config else []
+        )
+        result['summary']['graph_stats'] = graph_index.get_stats()
 
         return [
             TextContent(
@@ -738,6 +825,109 @@ class GetNoteGraphToolHandler(ToolHandler):
                 text=json.dumps(result, indent=2)
             )
         ]
+
+    def _traverse_with_index(
+        self,
+        start_path: str,
+        file_paths: list,
+        graph_index: GraphIndex,
+        graph_filter: GraphFilter,
+        file_getter: callable,
+        max_hops: int,
+        max_nodes: int,
+        snippet_length: int
+    ) -> dict:
+        """
+        Traverse graph using cached index for O(1) backlink queries.
+        """
+        from collections import deque
+
+        visited = set()
+        queue = deque([(start_path, 0)])  # (path, hop_distance)
+        result_nodes = {}
+        result_edges = []
+
+        while queue and len(result_nodes) < max_nodes:
+            current_path, hop = queue.popleft()
+
+            if current_path in visited:
+                continue
+
+            visited.add(current_path)
+
+            # Get metadata from index
+            metadata = graph_index.get_metadata(current_path)
+
+            # Apply filter (skip if doesn't match)
+            if graph_filter and not graph_filter.matches(current_path, metadata):
+                continue
+
+            # Get content for snippet
+            try:
+                content = file_getter(current_path)
+                if not isinstance(content, str):
+                    continue
+            except Exception:
+                continue
+
+            # Extract snippet
+            snippet = content[:snippet_length].strip()
+            if len(content) > snippet_length:
+                last_period = snippet.rfind('.')
+                if last_period > 0:
+                    snippet = snippet[:last_period + 1]
+
+            # Build node data
+            node_data = {
+                'path': current_path,
+                'title': metadata.get('title', current_path),
+                'word_count': metadata.get('word_count', 0),
+                'snippet': snippet,
+                'hop_distance': hop,
+                'tags': metadata.get('tags', []),
+                'frontmatter': metadata.get('frontmatter', {}),
+                'created': metadata.get('created'),
+                'modified': metadata.get('modified')
+            }
+            result_nodes[current_path] = node_data
+
+            # Get neighbors using index (O(1) lookups)
+            if hop < max_hops:
+                # Forward links
+                for target_path in graph_index.get_forward_links(current_path):
+                    if target_path not in visited:
+                        result_edges.append({
+                            'from': current_path,
+                            'to': target_path,
+                            'type': 'wikilink',
+                            'link_text': ''
+                        })
+                        queue.append((target_path, hop + 1))
+
+                # Backlinks (O(1) with index!)
+                for source_path in graph_index.get_backlinks(current_path):
+                    if source_path not in visited:
+                        result_edges.append({
+                            'from': source_path,
+                            'to': current_path,
+                            'type': 'wikilink',
+                            'link_text': ''
+                        })
+                        queue.append((source_path, hop + 1))
+
+        return {
+            'center_node': {
+                'path': start_path,
+                'title': result_nodes.get(start_path, {}).get('title', '')
+            },
+            'nodes': list(result_nodes.values()),
+            'edges': result_edges,
+            'summary': {
+                'total_nodes': len(result_nodes),
+                'total_edges': len(result_edges),
+                'max_hops': max_hops
+            }
+        }
 
 
 class GetActiveFileToolHandler(ToolHandler):
@@ -861,6 +1051,7 @@ Modes:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    # Core search parameters
                     "query": {
                         "type": "string",
                         "description": "Search query - can be a question, keywords, or natural language"
@@ -877,6 +1068,47 @@ Modes:
                         "description": "Ranking mode: 'default', 'research', or 'unweighted'",
                         "enum": ["default", "research", "unweighted"],
                         "default": "default"
+                    },
+                    # Filter parameters (aligned with graph tool)
+                    "filter_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter by tags (e.g., ['project', 'active'])"
+                    },
+                    "filter_tags_match_all": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "If true, require ALL tags. If false (default), ANY tag matches."
+                    },
+                    "filter_frontmatter": {
+                        "type": "object",
+                        "description": "Filter by frontmatter fields (e.g., {'pageType': 'daily', 'status': 'active'})"
+                    },
+                    "filter_include_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Include only paths matching these glob patterns (e.g., ['Projects/*', 'Work/*'])"
+                    },
+                    "filter_exclude_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exclude paths matching these patterns (e.g., ['Archive/*', 'Templates/*'])"
+                    },
+                    "filter_created_after": {
+                        "type": "string",
+                        "description": "Include only notes created after this date (YYYY-MM-DD)"
+                    },
+                    "filter_created_before": {
+                        "type": "string",
+                        "description": "Include only notes created before this date (YYYY-MM-DD)"
+                    },
+                    "filter_modified_after": {
+                        "type": "string",
+                        "description": "Include only notes modified after this date (YYYY-MM-DD)"
+                    },
+                    "filter_modified_before": {
+                        "type": "string",
+                        "description": "Include only notes modified before this date (YYYY-MM-DD)"
                     }
                 },
                 "required": ["query"]
@@ -891,14 +1123,40 @@ Modes:
         top_k = args.get("top_k", 5)
         mode = args.get("mode", "default")
 
+        # Build request payload
+        payload = {
+            "query": query,
+            "top_k": top_k,
+            "mode": mode,
+        }
+
+        # Add filter parameters if provided
+        filters = {}
+        if args.get("filter_tags"):
+            filters["tags"] = args["filter_tags"]
+            filters["tags_match_all"] = args.get("filter_tags_match_all", False)
+        if args.get("filter_frontmatter"):
+            filters["frontmatter"] = args["filter_frontmatter"]
+        if args.get("filter_include_paths"):
+            filters["include_paths"] = args["filter_include_paths"]
+        if args.get("filter_exclude_paths"):
+            filters["exclude_paths"] = args["filter_exclude_paths"]
+        if args.get("filter_created_after"):
+            filters["created_after"] = args["filter_created_after"]
+        if args.get("filter_created_before"):
+            filters["created_before"] = args["filter_created_before"]
+        if args.get("filter_modified_after"):
+            filters["modified_after"] = args["filter_modified_after"]
+        if args.get("filter_modified_before"):
+            filters["modified_before"] = args["filter_modified_before"]
+
+        if filters:
+            payload["filters"] = filters
+
         # Forward request to RAG backend
         try:
             proxy = backend.get_backend_proxy()
-            result = proxy.post("/api/smart-search-vault", {
-                "query": query,
-                "top_k": top_k,
-                "mode": mode,
-            })
+            result = proxy.post("/api/smart-search-vault", payload)
 
             return [
                 TextContent(
